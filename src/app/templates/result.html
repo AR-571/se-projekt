@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="de">
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Transkript-Ergebnis</title>
+</head>
+<body>
+<h1>Transkript für Datei {{ file_id }}</h1>
+{% if transcript %}
+<ul>
+    {% for segment in transcript["segments"] %}
+    <li><strong>[{{ segment["start"] | round(2) }}s]</strong> {{ segment["text"] }}</li>
+    {% endfor %}
+</ul>
+{% else %}
+<p>Kein Transkript gefunden.</p>
+{% endif %}
+<a href="{{ url_for('upload') }}">Zurück zum Upload</a>
+</body>
+</html>
