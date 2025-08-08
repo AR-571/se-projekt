@@ -1,4 +1,4 @@
-from flask import Flask, request, redirect, url_for, render_template, send_from_directory
+from flask import Flask, request, redirect, url_for, render_template
 from pathlib import Path
 import uuid
 import shutil
@@ -49,7 +49,6 @@ def result(file_id):
         transcript = json.load(f)
 
     return render_template("result.html", transcript=transcript, file_id=file_id)
-
 
 
 if __name__ == "__main__":

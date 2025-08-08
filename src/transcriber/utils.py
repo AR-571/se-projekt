@@ -1,10 +1,11 @@
 import subprocess
+from pathlib import Path
 
 
-def extract_audio(video_path, audio_path):
+def extract_audio(video_path: Path, audio_path: Path):
     """Extract audio as .wav from video file, according to whispers needs
-    :param str video_path: full path to video file
-    :param str audio_path: full path to audio file"""
+    :param video_path: full path to video file
+    :param audio_path: full path to audio file"""
     try:
         subprocess.run(
             [
@@ -26,3 +27,5 @@ def extract_audio(video_path, audio_path):
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Fehler beim Extrahieren von Audio: {e.stderr.decode()}")
+
+
