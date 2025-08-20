@@ -40,6 +40,30 @@
     color: var(--muted); 
 }
 
+.dropzone {
+  border: 2px dashed var(--border);   
+  border-radius: 16px;
+  padding: 24px;
+  min-height: 160px;
+
+  display: grid;          
+  place-items: center;
+  gap: 10px;
+
+  background: rgba(255,255,255,.02);
+  transition: 
+    background-color .2s ease,
+    border-color .2s ease,
+    box-shadow .2s ease;
+  position: relative;
+  cursor: pointer;
+}
+
+.dropzone:hover {
+  background: rgba(106,166,255,.06);
+  border-color: var(--primary);
+}
+
 .dropzone, .dropzone.dragover {
     border-color: var(--primary);
     background: rgba(106,166,255,.08);
