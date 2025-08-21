@@ -3,19 +3,52 @@
 <html>
 <head>
     <meta charset="UTF-8">
+    <link rel="stylesheet" href="resultstyle.css">
     <title>Transkript-Ergebnis</title>
 </head>
 <body>
 <h1>Transkript für Datei {{ file_id }}</h1>
-{% if transcript %}
-<ul>
-    {% for segment in transcript["segments"] %}
-    <li><strong>[{{ segment["start"] | round(2) }}s]</strong> {{ segment["text"] }}</li>
-    {% endfor %}
-</ul>
-{% else %}
-<p>Kein Transkript gefunden.</p>
-{% endif %}
+
+ <section class="card pad info-grid" aria-label="Dateiinformationen">
+        <div class="kv"><span>Dateiname</span><strong>{{ file_name or file_id }}</strong></div>
+        <div class="kv"><span>Upload</span><strong>{{ uploaded_at or "–" }}</strong></div>
+        <div class="kv"><span>Dauer</span><strong>{{ duration or "–" }}</strong></div>
+      </section>
+
+      <!-- suchen und kopieren -->
+      <section class="card pad tools" aria-label="Werkzeuge">
+        <div class="searchbox">
+          <input id="search" type="search" placeholder="Im Transkript suchen…" aria-label="Suche im Transkript" />
+          <svg class="icon" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M21 21l-4.35-4.35m1.1-5.15a6.25 6.25 0 11-12.5 0 6.25 6.25 0 0112.5 0z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <button id="copyAll" class="btn ghost" type="button" aria-label="Gesamtes Transkript kopieren">Alles kopieren</button>
+        <button id="clearSearch" class="btn" type="button" aria-label="Suche zurücksetzen">Suche leeren</button>
+      </section>
+  {% if transcript and transcript["segments"] %}
+      <section class="card pad" aria-label="Transkript">
+        <div class="timeline" id="timeline">
+          {% for segment in transcript["segments"] %}
+            <article class="segment" data-start="{{ segment["start"] }}" id="seg-{{ loop.index }}">
+              <span class="dot" aria-hidden="true"></span>
+              <div class="time">
+                <div class="stamp">[{{ segment["start"] | round(2) }}s]</div>
+                <div class="controls">
+                  {% if media_url %}
+                  <button class="mini-btn jump" data-jump="{{ segment["start"] }}" type="button" aria-label="Zu {{ segment["start"] | round(2) }} Sekunden springen">▶ Springen</button>
+                  {% endif %}
+                  <button class="mini-btn copy" data-id="seg-{{ loop.index }}" type="button" aria-label="Segment kopieren">⧉ Kopieren</button>
+                </div>
+              </div>
+              <div class="text" data-text>{{ segment["text"] }}</div>
+            </article>
+          {% endfor %}
+        </div>
+      </section>
+    {% else %}
+      <section class="card pad empty"><p>Kein Transkript gefunden.</p></section>
+    {% endif %}
 <a href="{{ url_for('upload') }}">Zurück zum Upload</a>
 </body>
 </html>
