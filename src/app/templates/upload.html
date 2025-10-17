@@ -1,19 +1,38 @@
 <!DOCTYPE html>
 <html lang="de">
 <head>
+    <link rel="stylesheet" href="style.css">
     <meta charset="UTF-8">
-    <title>Title</title>
     <title>Video Upload</title>
 </head>
-<body>
-    <h1>Video hochladen</h1>
-    <form method="POST" enctype="multipart/form-data">
-        <input type="file" name="video" accept=".mp4,.mov,.mkv" required>
-        <button type="submit">Hochladen & Transkribieren</button>
-    </form>
-</body>
-</head>
-<body>
 
+<body>
+    <script src="uiscript.js"></script>
+    <main class="container" aria-labelledby="title">
+        <h1 id="title">Video hochladen</h1>
+            <section class="card" aria-labelledby="Uploadbereich">
+                <form id="uploadForm" method="POST" enctype="multipart/form-data">
+                    <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-describedby="drop-hint">
+                        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                         <path d="M12 16V4m0 0l-3.5 3.5M12 4l3.5 3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                         <path d="M20 12.5v4.25A2.25 2.25 0 0 1 17.75 19H6.25A2.25 2.25 0 0 1 4 16.75V12.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                     <b>Datei hierher ziehen</b> oder klicken, um auszuwählen
+                    </div>
+                    <input type="fileInput" name="video" accept=".mp4,.mov,.mkv" required aria-label="Videodatei auswählen">
+                    <div id="selectedFile" class="selected-file" aria-live="polite"></div>
+                    <div class="error" id="errorMsg" role="alert"></div>
+                        <div class="actions">
+                        <button id="submitBtn" type="submit">Hochladen & Transkribieren</button>
+                        </div>  
+                 <div class="progress" aria-live="polite" hidden>
+                    <label for="progressBar" class="hint">Uploadfortschritt</label>
+                     <progress id="progressBar" max="100" value="0"></progress>
+                    </div>
+                 </form>
+                </form>
+            </section>
+            <footer>😊 Tipp: Du kannst die Datei auch einfach aus dem Explorer/Finder auf die Fläche ziehen.</footer>
+     </main>
 </body>
 </html>
