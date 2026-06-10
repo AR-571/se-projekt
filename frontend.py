@@ -25,6 +25,7 @@ def initialize_session():
         st.session_state.search_results = None
         st.session_state.active_video_path = None
         st.session_state.active_start_time = None
+        st.session_state.authenticated = False
 
 
 def upload_video(file, session_id: str) -> Optional[Dict]:
@@ -154,6 +155,20 @@ def main():
     # Initialize session
     initialize_session()
     
+    # Login screen
+    if not st.session_state.authenticated:
+        st.title("🔐 Login")
+        st.divider()
+        password = st.text_input("Enter password", type="password")
+        if st.button("Login", type="primary"):
+            if password == "tutor123":
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Incorrect password")
+        return
+    
+    # Main application
     st.title("🎥 Video Transcription Service")
     st.markdown(f"Session ID: `{st.session_state.session_id}`")
     st.divider()
@@ -163,7 +178,7 @@ def main():
         st.header("📤 Upload Video")
         uploaded_file = st.file_uploader(
             "Choose a video file",
-            type=["mp4", "mov", "avi", "mkv", "webm"]
+            type=["mp4", "mp3", "wav", "m4a"]
         )
         
         if uploaded_file is not None:
@@ -251,7 +266,7 @@ def main():
                                         st.session_state.active_start_time = int(segment['start'])
                                         st.rerun()
                                 else:
-                                    st.warning(f"Video file not found at {video_path}")
+                                    st.warning("Videodatei wurde auf dem Server bereinigt.")
             else:
                 st.info("No results found")
     
@@ -282,7 +297,7 @@ def main():
                     if video_path.exists():
                         st.video(str(video_path))
                     else:
-                        st.warning(f"Video file not found at {video_path}")
+                        st.warning("Videodatei wurde auf dem Server bereinigt.")
         else:
             st.info("No transcriptions yet. Upload a video to get started!")
     
@@ -297,7 +312,7 @@ def main():
                 st.session_state.active_start_time = None
                 st.rerun()
         else:
-            st.warning("Video file not found")
+            st.warning("Videodatei wurde auf dem Server bereinigt.")
             st.session_state.active_video_path = None
             st.session_state.active_start_time = None
 

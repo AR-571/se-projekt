@@ -46,6 +46,9 @@ db = Database(db_path=DB_PATH)
 # Global job progress tracking
 job_progress = {}
 
+# GPU concurrency lock to prevent multiple simultaneous transcriptions
+is_processing_active = False
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -128,7 +131,7 @@ def run_docker_transcription(job_id: str, workspace_path: Path, filename: str, t
             "whisper-clean",
             f"/workspace/{filename}",
             "/workspace",
-            "medium"
+            "large-v3-turbo"
         ]
         
         # Initialize progress for this job
@@ -187,9 +190,11 @@ async def process_transcription(job_id: str, workspace_path: Path, filename: str
     
     This function:
     1. Gets video duration using ffprobe
-    2. Runs the Docker container in a thread pool to avoid blocking
-    3. Reads the generated JSON file
-    4. Stores the transcription in the database
+    2. Sets GPU concurrency lock
+    3. Runs the Docker container in a thread pool to avoid blocking
+    4. Reads the generated JSON file
+    5. Stores the transcription in the database
+    6. Clears GPU concurrency lock
     
     Args:
         job_id: Unique identifier for the transcription job
@@ -197,7 +202,11 @@ async def process_transcription(job_id: str, workspace_path: Path, filename: str
         filename: Name of the video file
         session_id: Session identifier for isolation
     """
+    global is_processing_active
     try:
+        # Set GPU concurrency lock
+        is_processing_active = True
+        
         # Get video duration for progress tracking
         video_path = workspace_path / filename
         total_duration = get_video_duration(video_path)
@@ -245,6 +254,9 @@ async def process_transcription(job_id: str, workspace_path: Path, filename: str
         
     except Exception as e:
         print(f"Error processing transcription for job {job_id}: {str(e)}")
+    finally:
+        # Always clear GPU concurrency lock
+        is_processing_active = False
 
 
 @app.post("/upload", response_model=UploadResponse)
@@ -275,6 +287,24 @@ async def upload_video(
             status_code=400,
             detail="session_id is required"
         )
+    
+    # Check GPU concurrency lock
+    global is_processing_active
+    if is_processing_active:
+        raise HTTPException(
+            status_code=429,
+            detail="GPU is currently busy processing another video. Please wait."
+        )
+    
+    # Validate file extension
+    allowed_extensions = {".mp4", ".mp3", ".wav", ".m4a"}
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file format. Allowed formats: {', '.join(allowed_extensions)}"
+        )
+    
     try:
         # Generate unique job ID
         job_id = str(uuid.uuid4())
