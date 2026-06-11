@@ -126,8 +126,8 @@ def run_docker_transcription(job_id: str, workspace_path: Path, filename: str, t
         # Construct the Docker command
         command = [
             "docker", "run", "--rm", "--gpus", "all",
-            f"-v{workspace_absolute}:/workspace",
-            f"-v{cache_absolute}:/root/.cache/huggingface",
+            f"-v {workspace_absolute}:/workspace",
+            f"-v {cache_absolute}:/root/.cache/huggingface",
             "whisper-clean",
             f"/workspace/{filename}",
             "/workspace",

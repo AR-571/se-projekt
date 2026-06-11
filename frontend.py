@@ -5,6 +5,8 @@ Provides session-isolated video upload, search, and playback with timestamp seek
 import uuid
 import time
 import requests
+import yaml
+import bcrypt
 from pathlib import Path
 from typing import Optional, Dict, List
 
@@ -25,7 +27,16 @@ def initialize_session():
         st.session_state.search_results = None
         st.session_state.active_video_path = None
         st.session_state.active_start_time = None
-        st.session_state.authenticated = False
+    
+    # Always initialize authentication state (needed for persistence across reruns)
+    if "authentication_status" not in st.session_state:
+        st.session_state.authentication_status = None
+    if "name" not in st.session_state:
+        st.session_state.name = None
+    if "username" not in st.session_state:
+        st.session_state.username = None
+    if "login_completed" not in st.session_state:
+        st.session_state.login_completed = False
 
 
 def upload_video(file, session_id: str) -> Optional[Dict]:
@@ -155,22 +166,48 @@ def main():
     # Initialize session
     initialize_session()
     
-    # Login screen
-    if not st.session_state.authenticated:
-        st.title("🔐 Login")
-        st.divider()
-        password = st.text_input("Enter password", type="password")
-        if st.button("Login", type="primary"):
-            if password == "tutor123":
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("Incorrect password")
-        return
+    # Simple manual authentication (bypass streamlit-authenticator cookie issues)
+    if st.session_state.get('login_completed') == True:
+        # Already logged in, proceed to main app
+        pass
+    else:
+        # Show manual login form
+        st.subheader("Login")
+        
+        # Load credentials from config
+        config_file = Path(__file__).parent / "config.yaml"
+        with open(config_file) as file:
+            config = yaml.safe_load(file)
+        
+        with st.form("login_form"):
+            username_input = st.text_input("Username")
+            password_input = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login", type="primary")
+            
+            if submitted:
+                # Check credentials
+                if username_input in config['credentials']['usernames']:
+                    stored_hash = config['credentials']['usernames'][username_input]['password']
+                    if bcrypt.checkpw(password_input.encode('utf-8'), stored_hash.encode('utf-8')):
+                        # Login successful
+                        st.session_state.login_completed = True
+                        st.session_state.authentication_status = True
+                        st.session_state.username = username_input
+                        st.session_state.name = config['credentials']['usernames'][username_input]['name']
+                        st.rerun()
+                    else:
+                        st.error("Wrong password")
+                else:
+                    st.error("Username not found")
+        
+        # Return early if not authenticated
+        if st.session_state.get('login_completed') != True:
+            return
     
     # Main application
     st.title("🎥 Video Transcription Service")
     st.markdown(f"Session ID: `{st.session_state.session_id}`")
+    st.markdown(f"Logged in as: `{st.session_state.get('name', 'User')}`")
     st.divider()
     
     # Sidebar for upload
@@ -228,16 +265,28 @@ def main():
             st.subheader("Your Videos")
             for video in st.session_state.uploaded_videos:
                 st.text(f"📹 {video['video_filename']}")
+        
+        st.divider()
+        
+        # Logout button
+        if st.button("Logout"):
+            st.session_state.login_completed = False
+            st.session_state.authentication_status = False
+            st.session_state.name = None
+            st.session_state.username = None
+            st.rerun()
     
     # Main area
     tab1, tab2 = st.tabs(["🔍 Search", "📋 All Transcriptions"])
     
     with tab1:
         st.header("Search Transcriptions")
-        search_query = st.text_input("Enter search term", placeholder="Search for words or phrases...")
         
-        if search_query:
-            if st.button("Search", type="primary"):
+        with st.form("search_form"):
+            search_query = st.text_input("Enter search term", placeholder="Search for words or phrases...")
+            submitted = st.form_submit_button("Search", type="primary")
+            
+            if submitted and search_query:
                 with st.spinner("Searching..."):
                     results = search_transcriptions(search_query, st.session_state.session_id)
                     st.session_state.search_results = results
@@ -266,7 +315,7 @@ def main():
                                         st.session_state.active_start_time = int(segment['start'])
                                         st.rerun()
                                 else:
-                                    st.warning("Videodatei wurde auf dem Server bereinigt.")
+                                    st.warning("Video file has been cleaned up from the server.")
             else:
                 st.info("No results found")
     
@@ -297,7 +346,7 @@ def main():
                     if video_path.exists():
                         st.video(str(video_path))
                     else:
-                        st.warning("Videodatei wurde auf dem Server bereinigt.")
+                        st.warning("Video file has been cleaned up from the server.")
         else:
             st.info("No transcriptions yet. Upload a video to get started!")
     
@@ -312,7 +361,7 @@ def main():
                 st.session_state.active_start_time = None
                 st.rerun()
         else:
-            st.warning("Videodatei wurde auf dem Server bereinigt.")
+            st.warning("Video file has been cleaned up from the server.")
             st.session_state.active_video_path = None
             st.session_state.active_start_time = None
 
