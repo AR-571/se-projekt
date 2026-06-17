@@ -22,7 +22,7 @@ class TranscriptionResponse(BaseModel):
     id: int
     video_filename: str
     job_id: str
-    session_id: str
+    username: str
     transcription_data: List[TranscriptionSegment]
     created_at: datetime
 
@@ -49,7 +49,6 @@ class SearchRequest(BaseModel):
     Request model for searching transcriptions.
     """
     query: str = Field(..., min_length=1, description="Search query for full-text search")
-    session_id: str = Field(..., description="Session identifier for isolation")
 
 
 class SearchResponse(BaseModel):

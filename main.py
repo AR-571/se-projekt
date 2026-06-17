@@ -9,11 +9,18 @@ import asyncio
 import subprocess
 import json
 import re
+import yaml
+import bcrypt
+import jwt
+from jwt.exceptions import InvalidTokenError
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+import mimetypes
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends, Request
+from fastapi.responses import JSONResponse, FileResponse, Response, StreamingResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 from database import Database
 from models import (
@@ -27,9 +34,16 @@ from models import (
 
 
 # Configuration
-WORKSPACE_BASE_DIR = Path("workspaces")
+WORKSPACE_BASE_DIR = Path(__file__).parent / "workspaces"
 HOME_CACHE_PATH = Path.home() / ".cache" / "huggingface"
 DB_PATH = "transcriptions.db"
+
+# Authentication Configuration
+SECRET_KEY = "your-super-secret-jwt-key-change-in-production"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 1 Tag
+STREAMING_TOKEN_EXPIRE_MINUTES = 5
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 
 # Initialize FastAPI app
@@ -101,19 +115,61 @@ def get_video_duration(video_path: Path) -> Optional[float]:
         return None
 
 
-def run_docker_transcription(job_id: str, workspace_path: Path, filename: str, total_duration: float) -> bool:
+# --- AUTHENTICATION UTILS ---
+
+def verify_password(plain_password, hashed_password):
+    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+
+def authenticate_user(username, password):
+    config_path = Path(__file__).parent / "config.yaml"
+    try:
+        with open(config_path) as file:
+            config = yaml.safe_load(file)
+        users = config.get("credentials", {}).get("usernames", {})
+        if username in users:
+            if verify_password(password, users[username]["password"]):
+                return username
+    except Exception as e:
+        print(f"Error loading users from config.yaml: {e}")
+    return None
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta if expires_delta else timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        token_type: str = payload.get("type")
+        if username is None or token_type != "access":
+            raise credentials_exception
+    except InvalidTokenError:
+        raise credentials_exception
+    return username
+
+
+async def run_docker_transcription(job_id: str, workspace_path: Path, filename: str, total_duration: float, username: str) -> bool:
     """
-    Execute the Docker container for video transcription using subprocess.
+    Execute the Docker container for video transcription using asyncio subprocess.
     
-    This function runs the Whisper Docker container synchronously.
-    It should be called in a separate thread/process to avoid blocking the async event loop.
-    Reads stdout line-by-line to track progress updates from the Docker container.
+    This function runs the Whisper Docker container asynchronously.
+    It reads stdout line-by-line to track progress updates from the Docker container,
+    without blocking the FastAPI event loop.
     
     Args:
         job_id: Unique identifier for the transcription job
         workspace_path: Path to the workspace directory
         filename: Name of the video file to transcribe
         total_duration: Total duration of the video in seconds
+        username: The user who started the job
         
     Returns:
         True if transcription succeeded, False otherwise
@@ -126,55 +182,106 @@ def run_docker_transcription(job_id: str, workspace_path: Path, filename: str, t
         # Construct the Docker command
         command = [
             "docker", "run", "--rm", "--gpus", "all",
-            f"-v {workspace_absolute}:/workspace",
-            f"-v {cache_absolute}:/root/.cache/huggingface",
+            "--memory", "12g",          # Limit RAM to prevent host swap/freeze
+            "--memory-swap", "12g",     # Disable swapping for the container
+            # "--cpus", "4.0",          # Optional: Limit CPU cores if necessary
+            "-v", f"{workspace_absolute}:/workspace",
+            "-v", f"{cache_absolute}:/root/.cache/huggingface",
             "whisper-clean",
             f"/workspace/{filename}",
             "/workspace",
-            "large-v3-turbo"
+            "medium"
         ]
         
         # Initialize progress for this job
-        job_progress[job_id] = 0.0
+        job_progress[job_id] = {"progress": 0.0, "username": username}
         
-        # Run the Docker container with Popen to read stdout line-by-line
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
+        # Run the Docker container asynchronously
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=10485760  # 10 MB buffer limit to prevent overflows with large outputs
         )
         
-        # Read stdout line-by-line to track progress
-        while True:
-            line = process.stdout.readline()
-            if not line and process.poll() is not None:
-                break
-            if line:
-                line = line.strip()
-                # Parse progress from text output like "[681.00s -> 692.00s] Text..."
-                match = re.search(r'\[(\d+\.?\d*)s -> (\d+\.?\d*)s\]', line)
-                if match and total_duration > 0:
-                    current_end = float(match.group(2))
-                    progress = (current_end / total_duration) * 100
-                    job_progress[job_id] = min(progress, 100.0)
-                    print(f"Job {job_id} progress: {progress:.2f}%")
+        async def read_stdout():
+            while True:
+                try:
+                    line = await process.stdout.readline()
+                except ValueError as e:
+                    print(f"Warning: Line length exceeded buffer limit in stdout: {e}")
+                    # If buffer is exceeded, read and discard chunk to unblock
+                    chunk = await process.stdout.read(1048576) 
+                    if not chunk:
+                        break
+                    continue
+                
+                if not line:
+                    break
+                    
+                line_str = line.decode('utf-8', errors='replace').strip()
+                
+                # Check if output is from whisper_cli.py (JSON format)
+                if line_str.startswith('{') and line_str.endswith('}'):
+                    try:
+                        data = json.loads(line_str)
+                        if data.get("status") == "progress" and "progress" in data:
+                            job_progress[job_id]["progress"] = min(float(data["progress"]), 100.0)
+                    except json.JSONDecodeError:
+                        pass
+                else:
+                    # Parse progress from standard text output like "[681.00s -> 692.00s] Text..."
+                    match = re.search(r'\[(\d+\.?\d*)s -> (\d+\.?\d*)s\]', line_str)
+                    if match and total_duration > 0:
+                        current_end = float(match.group(2))
+                        progress = (current_end / total_duration) * 100
+                        job_progress[job_id]["progress"] = min(progress, 100.0)
+
+        async def read_stderr():
+            stderr_lines = []
+            while True:
+                try:
+                    line = await process.stderr.readline()
+                except ValueError:
+                    chunk = await process.stderr.read(1048576)
+                    if not chunk:
+                        break
+                    continue
+                if not line:
+                    break
+                # Only keep last 100 lines to prevent memory unbounded growth from stderr
+                if len(stderr_lines) > 100:
+                    stderr_lines.pop(0)
+                stderr_lines.append(line.decode('utf-8', errors='replace').strip())
+            return "\n".join(stderr_lines)
+
+        # Run stdout and stderr readers concurrently with a timeout
+        stdout_task = asyncio.create_task(read_stdout())
+        stderr_task = asyncio.create_task(read_stderr())
         
-        # Wait for process to complete
-        return_code = process.wait()
+        # Wait for process to complete with a 4-hour timeout (14400 seconds)
+        await asyncio.wait_for(process.wait(), timeout=14400)
+        
+        # Ensure readers finish
+        await stdout_task
+        stderr_output = await stderr_task
         
         # Check if the command succeeded
-        if return_code != 0:
-            stderr = process.stderr.read()
-            print(f"Docker command failed with return code {return_code}")
-            print(f"STDERR: {stderr}")
+        if process.returncode != 0:
+            print(f"Docker command failed with return code {process.returncode}")
+            print(f"STDERR: {stderr_output}")
             return False
         
         return True
         
-    except subprocess.TimeoutExpired:
-        print("Docker command timed out after 1 hour")
+    except asyncio.TimeoutError:
+        print(f"Docker container timed out after 4 hours for job {job_id}")
+        try:
+            process.kill()
+        except OSError:
+            pass
         return False
+        
     except Exception as e:
         print(f"Error running Docker command: {str(e)}")
         return False
@@ -184,14 +291,14 @@ def run_docker_transcription(job_id: str, workspace_path: Path, filename: str, t
             del job_progress[job_id]
 
 
-async def process_transcription(job_id: str, workspace_path: Path, filename: str, session_id: str) -> None:
+async def process_transcription(job_id: str, workspace_path: Path, filename: str, username: str) -> None:
     """
     Background task to process the transcription after file upload.
     
     This function:
     1. Gets video duration using ffprobe
     2. Sets GPU concurrency lock
-    3. Runs the Docker container in a thread pool to avoid blocking
+    3. Runs the Docker container asynchronously
     4. Reads the generated JSON file
     5. Stores the transcription in the database
     6. Clears GPU concurrency lock
@@ -200,7 +307,7 @@ async def process_transcription(job_id: str, workspace_path: Path, filename: str
         job_id: Unique identifier for the transcription job
         workspace_path: Path to the workspace directory
         filename: Name of the video file
-        session_id: Session identifier for isolation
+        username: Authenticated username for isolation
     """
     global is_processing_active
     try:
@@ -215,15 +322,13 @@ async def process_transcription(job_id: str, workspace_path: Path, filename: str
             print(f"Failed to get video duration for job {job_id}, using default 0")
             total_duration = 0.0
         
-        # Run Docker transcription in a thread pool to avoid blocking the event loop
-        loop = asyncio.get_event_loop()
-        success = await loop.run_in_executor(
-            None,
-            run_docker_transcription,
+        # Run Docker transcription asynchronously
+        success = await run_docker_transcription(
             job_id,
             workspace_path,
             filename,
-            total_duration
+            total_duration,
+            username
         )
         
         if not success:
@@ -246,7 +351,7 @@ async def process_transcription(job_id: str, workspace_path: Path, filename: str
         await db.save_transcription(
             video_filename=filename,
             job_id=job_id,
-            session_id=session_id,
+            username=username,
             transcription_data=transcription_data
         )
         
@@ -259,11 +364,25 @@ async def process_transcription(job_id: str, workspace_path: Path, filename: str
         is_processing_active = False
 
 
+# --- ENDPOINTS ---
+
+@app.post("/token")
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = authenticate_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    access_token = create_access_token(
+        data={"sub": user, "type": "access"},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
 @app.post("/upload", response_model=UploadResponse)
 async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    session_id: str = None
+    current_user: str = Depends(get_current_user)
 ) -> UploadResponse:
     """
     Upload a video file for transcription.
@@ -277,16 +396,10 @@ async def upload_video(
     Args:
         background_tasks: FastAPI BackgroundTasks for async processing
         file: Uploaded video file
-        session_id: Session identifier for isolation (required)
         
     Returns:
         UploadResponse with job_id and status
     """
-    if not session_id:
-        raise HTTPException(
-            status_code=400,
-            detail="session_id is required"
-        )
     
     # Check GPU concurrency lock
     global is_processing_active
@@ -325,7 +438,7 @@ async def upload_video(
             job_id,
             workspace_path,
             file.filename,
-            session_id
+            current_user
         )
         
         return UploadResponse(
@@ -347,7 +460,10 @@ async def upload_video(
 
 
 @app.get("/transcription/{job_id}")
-async def get_transcription(job_id: str):
+async def get_transcription(
+    job_id: str,
+    current_user: str = Depends(get_current_user)
+):
     """
     Retrieve a transcription by job ID or return progress status if still processing.
     
@@ -362,9 +478,15 @@ async def get_transcription(job_id: str):
     """
     # Check if job is still processing
     if job_id in job_progress:
+        job_info = job_progress[job_id]
+        if job_info["username"] != current_user:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Transcription with job_id {job_id} not found"
+            )
         return {
             "status": "processing",
-            "progress": job_progress[job_id]
+            "progress": job_info["progress"]
         }
     
     # Check if transcription is completed in database
@@ -386,14 +508,17 @@ async def get_transcription(job_id: str):
         id=transcription["id"],
         video_filename=transcription["video_filename"],
         job_id=transcription["job_id"],
-        session_id=transcription["session_id"],
+        username=transcription["username"],
         transcription_data=segments,
         created_at=transcription["created_at"]
     )
 
 
 @app.post("/search", response_model=SearchResponse)
-async def search_transcriptions(request: SearchRequest) -> SearchResponse:
+async def search_transcriptions(
+    request: SearchRequest,
+    current_user: str = Depends(get_current_user)
+) -> SearchResponse:
     """
     Search transcriptions using full-text search.
     
@@ -404,7 +529,7 @@ async def search_transcriptions(request: SearchRequest) -> SearchResponse:
         SearchResponse with matching transcriptions
     """
     try:
-        results = await db.search_transcriptions(request.query, request.session_id)
+        results = await db.search_transcriptions(request.query, current_user)
         
         # Convert results to Pydantic models and count matching text segments
         transcription_responses = []
@@ -425,7 +550,7 @@ async def search_transcriptions(request: SearchRequest) -> SearchResponse:
                     id=result["id"],
                     video_filename=result["video_filename"],
                     job_id=result["job_id"],
-                    session_id=result["session_id"],
+                username=result["username"],
                     transcription_data=segments,
                     created_at=result["created_at"]
                 )
@@ -444,18 +569,20 @@ async def search_transcriptions(request: SearchRequest) -> SearchResponse:
 
 
 @app.get("/transcriptions", response_model=SearchResponse)
-async def get_all_transcriptions(session_id: Optional[str] = None) -> SearchResponse:
+async def get_all_transcriptions(
+    current_user: str = Depends(get_current_user)
+) -> SearchResponse:
     """
-    Retrieve all transcriptions, optionally filtered by session.
+    Retrieve all transcriptions for the authenticated user.
     
     Args:
-        session_id: Optional session identifier for filtering
+        current_user: User identifier from JWT
         
     Returns:
         SearchResponse with transcriptions
     """
     try:
-        results = await db.get_all_transcriptions(session_id)
+        results = await db.get_all_transcriptions(current_user)
         
         # Convert results to Pydantic models
         transcription_responses = []
@@ -469,7 +596,7 @@ async def get_all_transcriptions(session_id: Optional[str] = None) -> SearchResp
                     id=result["id"],
                     video_filename=result["video_filename"],
                     job_id=result["job_id"],
-                    session_id=result["session_id"],
+                username=result["username"],
                     transcription_data=segments,
                     created_at=result["created_at"]
                 )
@@ -485,6 +612,88 @@ async def get_all_transcriptions(session_id: Optional[str] = None) -> SearchResp
             status_code=500,
             detail=f"Failed to retrieve transcriptions: {str(e)}"
         )
+
+
+@app.get("/streaming-token/{job_id}")
+async def get_streaming_token(job_id: str, current_user: str = Depends(get_current_user)):
+    transcription = await db.get_transcription(job_id)
+    if not transcription or transcription["username"] != current_user:
+        raise HTTPException(status_code=404, detail="Transcription not found")
+    
+    token = create_access_token(
+        data={"sub": current_user, "job_id": job_id, "type": "streaming"},
+        expires_delta=timedelta(minutes=STREAMING_TOKEN_EXPIRE_MINUTES)
+    )
+    return {"streaming_token": token}
+
+
+@app.get("/media/{job_id}")
+async def get_media(job_id: str, token: str, request: Request):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "streaming" or payload.get("job_id") != job_id:
+            raise HTTPException(status_code=403, detail="Invalid streaming token")
+    except InvalidTokenError:
+        raise HTTPException(status_code=403, detail="Invalid streaming token")
+    
+    workspace_path = WORKSPACE_BASE_DIR / job_id
+    media_files = [f for f in workspace_path.iterdir() if f.is_file() and f.suffix != ".json"]
+    if not media_files:
+        raise HTTPException(status_code=404, detail="Media not found")
+        
+    file_path = media_files[0]
+    file_size = file_path.stat().st_size
+    
+    content_type, _ = mimetypes.guess_type(file_path)
+    content_type = content_type or "application/octet-stream"
+    
+    # Prüfen, ob der Browser einen spezifischen Teil (Range) anfordert
+    range_header = request.headers.get("range")
+    if not range_header:
+        return FileResponse(file_path, headers={"Accept-Ranges": "bytes"}, media_type=content_type)
+        
+    try:
+        # Den Range-Header parsen (z.B. "bytes=0-1023")
+        byte_range = range_header.replace("bytes=", "").split("-")
+        start = int(byte_range[0])
+        end = int(byte_range[1]) if len(byte_range) > 1 and byte_range[1] else file_size - 1
+    except ValueError:
+        return Response(status_code=400, content="Invalid Range header")
+        
+    if start >= file_size or end >= file_size:
+        return Response(
+            status_code=416, 
+            content="Range Not Satisfiable",
+            headers={"Content-Range": f"bytes */{file_size}"}
+        )
+        
+    chunk_size = end - start + 1
+    
+    # Generator-Funktion, die das Video effizient in kleinen 1MB Blöcken lädt
+    def file_iterator(path, start_byte, bytes_to_read):
+        with open(path, "rb") as f:
+            f.seek(start_byte)
+            bytes_read = 0
+            while bytes_read < bytes_to_read:
+                read_size = min(1024 * 1024, bytes_to_read - bytes_read)
+                chunk = f.read(read_size)
+                if not chunk:
+                    break
+                bytes_read += len(chunk)
+                yield chunk
+                
+    headers = {
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(chunk_size),
+        "Content-Type": content_type
+    }
+    
+    return StreamingResponse(
+        file_iterator(file_path, start, chunk_size),
+        status_code=206,  # 206 Partial Content sagt dem Browser, dass dies nur ein Chunk ist
+        headers=headers
+    )
 
 
 @app.get("/health")

@@ -46,7 +46,7 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 video_filename TEXT NOT NULL,
                 job_id TEXT NOT NULL UNIQUE,
-                session_id TEXT NOT NULL,
+                username TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 json_data TEXT NOT NULL
             )
@@ -57,7 +57,7 @@ class Database:
             CREATE VIRTUAL TABLE IF NOT EXISTS transcriptions_fts 
             USING fts5(
                 video_filename, 
-                session_id,
+                username,
                 text_content,
                 content='transcriptions',
                 content_rowid='id'
@@ -68,8 +68,8 @@ class Database:
         await self._connection.execute("""
             CREATE TRIGGER IF NOT EXISTS transcriptions_ai 
             AFTER INSERT ON transcriptions BEGIN
-                INSERT INTO transcriptions_fts(rowid, video_filename, session_id, text_content)
-                VALUES (new.id, new.video_filename, new.session_id, new.json_data);
+                INSERT INTO transcriptions_fts(rowid, video_filename, username, text_content)
+                VALUES (new.id, new.video_filename, new.username, new.json_data);
             END
         """)
         
@@ -84,8 +84,8 @@ class Database:
             CREATE TRIGGER IF NOT EXISTS transcriptions_au 
             AFTER UPDATE ON transcriptions BEGIN
                 DELETE FROM transcriptions_fts WHERE rowid = old.id;
-                INSERT INTO transcriptions_fts(rowid, video_filename, session_id, text_content)
-                VALUES (new.id, new.video_filename, new.session_id, new.json_data);
+                INSERT INTO transcriptions_fts(rowid, video_filename, username, text_content)
+                VALUES (new.id, new.video_filename, new.username, new.json_data);
             END
         """)
         
@@ -95,7 +95,7 @@ class Database:
         self, 
         video_filename: str, 
         job_id: str,
-        session_id: str,
+        username: str,
         transcription_data: List[Dict]
     ) -> int:
         """
@@ -104,7 +104,7 @@ class Database:
         Args:
             video_filename: Name of the video file
             job_id: Unique identifier for the transcription job
-            session_id: Session identifier for isolation
+            username: Authenticated username for isolation
             transcription_data: List of transcription segments with timestamps and text
             
         Returns:
@@ -114,10 +114,10 @@ class Database:
         
         cursor = await self._connection.execute(
             """
-            INSERT INTO transcriptions (video_filename, job_id, session_id, json_data)
+            INSERT INTO transcriptions (video_filename, job_id, username, json_data)
             VALUES (?, ?, ?, ?)
             """,
-            (video_filename, job_id, session_id, json_data)
+            (video_filename, job_id, username, json_data)
         )
         await self._connection.commit()
         
@@ -135,7 +135,7 @@ class Database:
         """
         cursor = await self._connection.execute(
             """
-            SELECT id, video_filename, job_id, session_id, json_data, created_at
+            SELECT id, video_filename, job_id, username, json_data, created_at
             FROM transcriptions
             WHERE job_id = ?
             """,
@@ -148,32 +148,32 @@ class Database:
                 "id": row[0],
                 "video_filename": row[1],
                 "job_id": row[2],
-                "session_id": row[3],
+                "username": row[3],
                 "transcription_data": json.loads(row[4]),
                 "created_at": row[5]
             }
         return None
     
-    async def search_transcriptions(self, query: str, session_id: str) -> List[Dict]:
+    async def search_transcriptions(self, query: str, username: str) -> List[Dict]:
         """
-        Search transcriptions using FTS5 full-text search with session isolation.
+        Search transcriptions using FTS5 full-text search with user isolation.
         
         Args:
             query: Search query string
-            session_id: Session identifier for isolation
+            username: User identifier for isolation
             
         Returns:
             List of matching transcription records
         """
         cursor = await self._connection.execute(
             """
-            SELECT t.id, t.video_filename, t.job_id, t.session_id, t.json_data, t.created_at
+            SELECT t.id, t.video_filename, t.job_id, t.username, t.json_data, t.created_at
             FROM transcriptions t
             JOIN transcriptions_fts fts ON t.id = fts.rowid
-            WHERE t.session_id = ? AND transcriptions_fts MATCH ?
+            WHERE t.username = ? AND transcriptions_fts MATCH ?
             ORDER BY t.created_at DESC
             """,
-            (session_id, query)
+            (username, query)
         )
         rows = await cursor.fetchall()
         
@@ -183,37 +183,37 @@ class Database:
                 "id": row[0],
                 "video_filename": row[1],
                 "job_id": row[2],
-                "session_id": row[3],
+                "username": row[3],
                 "transcription_data": json.loads(row[4]),
                 "created_at": row[5]
             })
         
         return results
     
-    async def get_all_transcriptions(self, session_id: Optional[str] = None) -> List[Dict]:
+    async def get_all_transcriptions(self, username: Optional[str] = None) -> List[Dict]:
         """
-        Retrieve all transcriptions, optionally filtered by session.
+        Retrieve all transcriptions, optionally filtered by username.
         
         Args:
-            session_id: Optional session identifier for filtering
+            username: Optional user identifier for filtering
             
         Returns:
             List of transcription records
         """
-        if session_id:
+        if username:
             cursor = await self._connection.execute(
                 """
-                SELECT id, video_filename, job_id, session_id, json_data, created_at
+                SELECT id, video_filename, job_id, username, json_data, created_at
                 FROM transcriptions
-                WHERE session_id = ?
+                WHERE username = ?
                 ORDER BY created_at DESC
                 """,
-                (session_id,)
+                (username,)
             )
         else:
             cursor = await self._connection.execute(
                 """
-                SELECT id, video_filename, job_id, session_id, json_data, created_at
+                SELECT id, video_filename, job_id, username, json_data, created_at
                 FROM transcriptions
                 ORDER BY created_at DESC
                 """
@@ -226,7 +226,7 @@ class Database:
                 "id": row[0],
                 "video_filename": row[1],
                 "job_id": row[2],
-                "session_id": row[3],
+                "username": row[3],
                 "transcription_data": json.loads(row[4]),
                 "created_at": row[5]
             })
