@@ -52,39 +52,56 @@ class Database:
             )
         """)
         
+        # Migration: Prüfen, ob die alte fehlerhafte FTS5 Tabelle existiert
+        cursor = await self._connection.execute("PRAGMA table_info(transcriptions_fts)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        if 'text_content' in columns:
+            await self._connection.execute("DROP TABLE IF EXISTS transcriptions_fts")
+
+        # Alte Trigger immer löschen, um sie frisch anzulegen
+        await self._connection.execute("DROP TRIGGER IF EXISTS transcriptions_ai")
+        await self._connection.execute("DROP TRIGGER IF EXISTS transcriptions_ad")
+        await self._connection.execute("DROP TRIGGER IF EXISTS transcriptions_au")
+
         # FTS5 virtual table for full-text search
         await self._connection.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS transcriptions_fts 
             USING fts5(
                 video_filename, 
                 username,
-                text_content,
+                json_data,
                 content='transcriptions',
                 content_rowid='id'
             )
         """)
         
+        # Falls wir die alte Tabelle gelöscht haben, Index aus der Haupttabelle neu aufbauen
+        if 'text_content' in columns:
+            await self._connection.execute("INSERT INTO transcriptions_fts(transcriptions_fts) VALUES('rebuild')")
+
         # Triggers to keep FTS table in sync with main table
         await self._connection.execute("""
-            CREATE TRIGGER IF NOT EXISTS transcriptions_ai 
+            CREATE TRIGGER transcriptions_ai 
             AFTER INSERT ON transcriptions BEGIN
-                INSERT INTO transcriptions_fts(rowid, video_filename, username, text_content)
+                INSERT INTO transcriptions_fts(rowid, video_filename, username, json_data)
                 VALUES (new.id, new.video_filename, new.username, new.json_data);
             END
         """)
         
         await self._connection.execute("""
-            CREATE TRIGGER IF NOT EXISTS transcriptions_ad 
+            CREATE TRIGGER transcriptions_ad 
             AFTER DELETE ON transcriptions BEGIN
-                DELETE FROM transcriptions_fts WHERE rowid = old.id;
+                INSERT INTO transcriptions_fts(transcriptions_fts, rowid, video_filename, username, json_data)
+                VALUES ('delete', old.id, old.video_filename, old.username, old.json_data);
             END
         """)
         
         await self._connection.execute("""
-            CREATE TRIGGER IF NOT EXISTS transcriptions_au 
+            CREATE TRIGGER transcriptions_au 
             AFTER UPDATE ON transcriptions BEGIN
-                DELETE FROM transcriptions_fts WHERE rowid = old.id;
-                INSERT INTO transcriptions_fts(rowid, video_filename, username, text_content)
+                INSERT INTO transcriptions_fts(transcriptions_fts, rowid, video_filename, username, json_data)
+                VALUES ('delete', old.id, old.video_filename, old.username, old.json_data);
+                INSERT INTO transcriptions_fts(rowid, video_filename, username, json_data)
                 VALUES (new.id, new.video_filename, new.username, new.json_data);
             END
         """)
@@ -165,6 +182,11 @@ class Database:
         Returns:
             List of matching transcription records
         """
+        # Sanitize query for FTS5 to prevent syntax errors and crashes
+        # Replace double quotes with escaped double quotes and wrap in quotes
+        safe_query = query.replace('"', '""')
+        safe_query = f'"{safe_query}"'
+        
         cursor = await self._connection.execute(
             """
             SELECT t.id, t.video_filename, t.job_id, t.username, t.json_data, t.created_at
@@ -173,7 +195,7 @@ class Database:
             WHERE t.username = ? AND transcriptions_fts MATCH ?
             ORDER BY t.created_at DESC
             """,
-            (username, query)
+            (username, safe_query)
         )
         rows = await cursor.fetchall()
         

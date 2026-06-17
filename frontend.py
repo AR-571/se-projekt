@@ -158,6 +158,24 @@ def get_streaming_url(job_id: str) -> Optional[str]:
     return None
 
 
+def delete_all_user_data() -> bool:
+    """
+    Delete all transcriptions and files for the current user.
+    """
+    try:
+        headers = {"Authorization": f"Bearer {st.session_state.access_token}"}
+        response = requests.delete(f"{API_BASE_URL}/transcriptions", headers=headers)
+        
+        if response.status_code == 200:
+            return True
+        else:
+            st.error(f"Failed to delete data: {response.status_code} - {response.text}")
+            return False
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to connect to backend: {str(e)}")
+        return False
+
+
 def main():
     """
     Main Streamlit application.
@@ -253,35 +271,35 @@ def main():
                 progress_bar = st.empty()
                 progress_bar.progress(st.session_state.get("current_progress", 0))
             
-            # Poll for transcription completion with progress bar
-            for i in range(300):  # Poll for up to 15 minutes (300 * 3 seconds)
-                transcription = get_transcription(st.session_state.current_job_id)
-                
-                if transcription:
-                    if transcription.get("status") == "processing":
-                        # Update progress bar
-                        progress = transcription.get("progress", 0)
-                        progress_bar.progress(progress / 100)
-                        st.session_state.current_progress = progress / 100
-                    else:
-                        # Transcription completed
-                        progress_bar.progress(100)
-                        st.success("Transcription completed!")
-                        # Insert at the beginning so the newest video shows at the top
-                        st.session_state.uploaded_videos.insert(0, transcription)
-                        st.session_state.current_job_id = None
-                        st.session_state.progress_bar_created = False
-                        st.session_state.current_progress = 0
-                        progress_bar.empty()
-                        st.rerun()
-                        return  # Exit only after completion to avoid duplicate progress bars
-                
-                time.sleep(3)
+            # Fetch current status
+            transcription = get_transcription(st.session_state.current_job_id)
             
-            progress_bar.empty()
-            st.warning("Transcription is taking longer than expected. Please check manually.")
-            st.session_state.progress_bar_created = False
-            st.session_state.current_progress = 0
+            if transcription:
+                if transcription.get("status") == "processing":
+                    # Update progress bar
+                    progress = transcription.get("progress", 0)
+                    progress_bar.progress(progress / 100)
+                    st.session_state.current_progress = progress / 100
+                    
+                    # Sleep briefly, then completely rerun the app
+                    # This prevents freezing the Streamlit UI thread for minutes!
+                    time.sleep(3)
+                    st.rerun()
+                else:
+                    # Transcription completed
+                    progress_bar.progress(100)
+                    st.success("Transcription completed!")
+                    # Insert at the beginning so the newest video shows at the top
+                    st.session_state.uploaded_videos.insert(0, transcription)
+                    st.session_state.current_job_id = None
+                    st.session_state.progress_bar_created = False
+                    st.session_state.current_progress = 0
+                    progress_bar.empty()
+                    st.rerun()
+            else:
+                # If API fails temporarily, wait and try again
+                time.sleep(3)
+                st.rerun()
         
         st.divider()
         
@@ -292,6 +310,18 @@ def main():
                 st.text(f"📹 {video['video_filename']}")
         
         st.divider()
+        
+        st.subheader("⚙️ Data Management")
+        if st.button("🗑️ Delete All My Data", type="secondary", use_container_width=True):
+            with st.spinner("Deleting all your data..."):
+                if delete_all_user_data():
+                    st.session_state.uploaded_videos = []
+                    st.session_state.search_results = None
+                    st.session_state.active_media_url = None
+                    st.session_state.active_start_time = None
+                    st.success("All data successfully deleted!")
+                    time.sleep(1)
+                    st.rerun()
         
         # Logout button
         if st.button("Logout"):
@@ -375,8 +405,22 @@ def main():
                     stream_url = get_streaming_url(video["job_id"])
                     if stream_url:
                         if Path(video["video_filename"]).suffix.lower() in [".mp4", ".mov", ".avi", ".mkv"]:
-                            html_code = f'''<video width="100%" controls autocomplete="off" src="{stream_url}">Ihr Browser unterstützt dieses Video nicht.</video>'''
-                            components.html(html_code, height=450)
+                            html_code = f'''
+                            <style>
+                                body {{ margin: 0; }}
+                                .player-wrapper {{
+                                    width: 100%; height: 100%; background-color: black;
+                                }}
+                                .player-wrapper video {{
+                                    width: 100%; height: 100%;
+                                    object-fit: contain;
+                                }}
+                            </style>
+                            <div class="player-wrapper">
+                                <video controls autocomplete="off" src="{stream_url}">Ihr Browser unterstützt dieses Video nicht.</video>
+                            </div>
+                            '''
+                            components.html(html_code, height=600)
                         else:
                             html_code = f'''<audio style="width: 100%;" controls src="{stream_url}">Ihr Browser unterstützt dieses Audio nicht.</audio>'''
                             components.html(html_code, height=80)
@@ -396,9 +440,19 @@ def main():
         
         if file_type == "video":
             html_code = f'''
-            <video id="mediaPlayer" width="100%" controls autoplay autocomplete="off" src="{media_url}">
-                Ihr Browser unterstützt dieses Video nicht.
-            </video>
+            <style>
+                body {{ margin: 0; }}
+                .player-wrapper {{
+                    width: 100%; height: 100%; background-color: black;
+                }}
+                .player-wrapper video {{
+                    width: 100%; height: 100%;
+                    object-fit: contain;
+                }}
+            </style>
+            <div class="player-wrapper">
+                <video id="mediaPlayer" controls autoplay autocomplete="off" src="{media_url}">Ihr Browser unterstützt dieses Video nicht.</video>
+            </div>
             <script>
                 var player = document.getElementById("mediaPlayer");
                 player.addEventListener('loadedmetadata', function() {{
@@ -407,7 +461,7 @@ def main():
                 if (player.readyState >= 1) {{ player.currentTime = {start_time}; }}
             </script>
             '''
-            components.html(html_code, height=450)
+            components.html(html_code, height=600)
         else:
             html_code = f'''
             <audio id="mediaPlayer" style="width: 100%;" controls autoplay src="{media_url}">

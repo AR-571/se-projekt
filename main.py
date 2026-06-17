@@ -16,6 +16,8 @@ from jwt.exceptions import InvalidTokenError
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+import shutil
+import sqlite3
 import mimetypes
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends, Request
@@ -39,7 +41,7 @@ HOME_CACHE_PATH = Path.home() / ".cache" / "huggingface"
 DB_PATH = "transcriptions.db"
 
 # Authentication Configuration
-SECRET_KEY = "your-super-secret-jwt-key-change-in-production"
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-super-secret-jwt-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 1 Tag
 STREAMING_TOKEN_EXPIRE_MINUTES = 5
@@ -550,7 +552,7 @@ async def search_transcriptions(
                     id=result["id"],
                     video_filename=result["video_filename"],
                     job_id=result["job_id"],
-                username=result["username"],
+                    username=result["username"],
                     transcription_data=segments,
                     created_at=result["created_at"]
                 )
@@ -596,7 +598,7 @@ async def get_all_transcriptions(
                     id=result["id"],
                     video_filename=result["video_filename"],
                     job_id=result["job_id"],
-                username=result["username"],
+                    username=result["username"],
                     transcription_data=segments,
                     created_at=result["created_at"]
                 )
@@ -611,6 +613,38 @@ async def get_all_transcriptions(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to retrieve transcriptions: {str(e)}"
+        )
+
+
+@app.delete("/transcriptions")
+async def delete_all_transcriptions(current_user: str = Depends(get_current_user)):
+    """
+    Delete all transcriptions and media files for the authenticated user.
+    """
+    try:
+        # 1. Fetch all user's transcriptions to get job_ids
+        results = await db.get_all_transcriptions(current_user)
+        
+        # 2. Delete from database using direct sqlite3 execution 
+        # (Since README says FTS sync is handled by triggers, this is sufficient)
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM transcriptions WHERE username = ?", (current_user,))
+            conn.commit()
+
+        # 3. Delete all physical files and directories from workspaces safely
+        for result in results:
+            job_id = result["job_id"]
+            workspace_path = WORKSPACE_BASE_DIR / job_id
+            if workspace_path.exists():
+                shutil.rmtree(workspace_path, ignore_errors=True)
+            
+        return {"status": "success", "message": f"Deleted {len(results)} transcription(s)"}
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete transcriptions: {str(e)}"
         )
 
 
@@ -637,6 +671,10 @@ async def get_media(job_id: str, token: str, request: Request):
         raise HTTPException(status_code=403, detail="Invalid streaming token")
     
     workspace_path = WORKSPACE_BASE_DIR / job_id
+
+    if not workspace_path.exists():
+        raise HTTPException(status_code=404, detail="Media workspace not found")
+
     media_files = [f for f in workspace_path.iterdir() if f.is_file() and f.suffix != ".json"]
     if not media_files:
         raise HTTPException(status_code=404, detail="Media not found")
