@@ -36,7 +36,7 @@ pyvenv.cfg
 *.sqlite
 *.sqlite3
 
-# Workspaces and data
+# Workspaces and (user) data
 workspaces/
 data/
 jobs/
@@ -51,4 +51,6 @@ jobs/
 # OS
 .DS_Store
 Thumbs.db
-config.yaml
+
+# sensitive
+.env

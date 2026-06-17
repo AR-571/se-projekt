@@ -9,6 +9,7 @@ from typing import Optional, Dict, List
 
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 
 # Configuration
 API_BASE_URL = "http://localhost:8000"
@@ -241,66 +242,56 @@ def main():
     # Sidebar for upload
     with st.sidebar:
         st.header("📤 Upload Video")
-        uploaded_file = st.file_uploader(
-            "Choose a video file",
-            type=["mp4", "mp3", "wav", "m4a"]
-        )
-        
-        if uploaded_file is not None:
-            if st.button("Upload & Transcribe", type="primary"):
-                with st.spinner("Uploading video..."):
-                    result = upload_video(uploaded_file)
-                    
-                    if result:
-                        st.session_state.current_job_id = result["job_id"]
-                        st.success(f"Upload successful! Job ID: {result['job_id']}")
-                        st.info("Transcription in progress...")
-        
-        st.divider()
-        
-        # Show current upload status
+
+        # If a job is currently processing, show its status.
+        # Otherwise, show the upload widget to prevent duplicate UI elements.
         if st.session_state.current_job_id:
             st.subheader("Current Upload")
             st.text(f"Job ID: {st.session_state.current_job_id}")
-            
-            # Only create progress bar if not already created
-            if not st.session_state.progress_bar_created:
-                progress_bar = st.progress(0)
-                st.session_state.progress_bar_created = True
-            else:
-                progress_bar = st.empty()
-                progress_bar.progress(st.session_state.get("current_progress", 0))
-            
+
+            progress_bar = st.progress(st.session_state.get("current_progress", 0))
+
             # Fetch current status
             transcription = get_transcription(st.session_state.current_job_id)
-            
+
             if transcription:
                 if transcription.get("status") == "processing":
                     # Update progress bar
                     progress = transcription.get("progress", 0)
                     progress_bar.progress(progress / 100)
                     st.session_state.current_progress = progress / 100
-                    
-                    # Sleep briefly, then completely rerun the app
-                    # This prevents freezing the Streamlit UI thread for minutes!
-                    time.sleep(3)
-                    st.rerun()
+
+                    # Use streamlit-autorefresh instead of blocking time.sleep
+                    st_autorefresh(interval=3000, limit=None, key="transcription_polling")
                 else:
                     # Transcription completed
-                    progress_bar.progress(100)
                     st.success("Transcription completed!")
+                    time.sleep(1) # Give user a moment to see the success message
                     # Insert at the beginning so the newest video shows at the top
                     st.session_state.uploaded_videos.insert(0, transcription)
                     st.session_state.current_job_id = None
-                    st.session_state.progress_bar_created = False
                     st.session_state.current_progress = 0
-                    progress_bar.empty()
                     st.rerun()
             else:
                 # If API fails temporarily, wait and try again
-                time.sleep(3)
-                st.rerun()
-        
+                st_autorefresh(interval=3000, limit=None, key="transcription_polling_error")
+        else:
+            # No active job, show the uploader
+            uploaded_file = st.file_uploader(
+                "Choose a video file",
+                type=["mp4", "mp3", "wav", "m4a"]
+            )
+
+            if uploaded_file is not None:
+                if st.button("Upload & Transcribe", type="primary"):
+                    with st.spinner("Uploading video..."):
+                        result = upload_video(uploaded_file)
+
+                        if result:
+                            st.session_state.current_job_id = result["job_id"]
+                            # Rerun immediately to switch to the progress view
+                            st.rerun()
+
         st.divider()
         
         # Show uploaded videos

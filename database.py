@@ -47,12 +47,20 @@ class Database:
                 video_filename TEXT NOT NULL,
                 job_id TEXT NOT NULL UNIQUE,
                 username TEXT NOT NULL,
+                transcription_text TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 json_data TEXT NOT NULL
             )
         """)
         
-        # Migration: Prüfen, ob die alte fehlerhafte FTS5 Tabelle existiert
+        # --- Schema Migration ---
+        # 1. Add transcription_text column to main table if it doesn't exist
+        cursor = await self._connection.execute("PRAGMA table_info(transcriptions)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        if 'transcription_text' not in columns:
+            await self._connection.execute("ALTER TABLE transcriptions ADD COLUMN transcription_text TEXT DEFAULT '' NOT NULL")
+
+        # 2. Check for old FTS5 table schema (with 'text_content' or indexing json_data) and drop if necessary
         cursor = await self._connection.execute("PRAGMA table_info(transcriptions_fts)")
         columns = [row[1] for row in await cursor.fetchall()]
         if 'text_content' in columns:
@@ -69,7 +77,7 @@ class Database:
             USING fts5(
                 video_filename, 
                 username,
-                json_data,
+                transcription_text,
                 content='transcriptions',
                 content_rowid='id'
             )
@@ -83,26 +91,26 @@ class Database:
         await self._connection.execute("""
             CREATE TRIGGER transcriptions_ai 
             AFTER INSERT ON transcriptions BEGIN
-                INSERT INTO transcriptions_fts(rowid, video_filename, username, json_data)
-                VALUES (new.id, new.video_filename, new.username, new.json_data);
+                INSERT INTO transcriptions_fts(rowid, video_filename, username, transcription_text)
+                VALUES (new.id, new.video_filename, new.username, new.transcription_text);
             END
         """)
         
         await self._connection.execute("""
             CREATE TRIGGER transcriptions_ad 
             AFTER DELETE ON transcriptions BEGIN
-                INSERT INTO transcriptions_fts(transcriptions_fts, rowid, video_filename, username, json_data)
-                VALUES ('delete', old.id, old.video_filename, old.username, old.json_data);
+                INSERT INTO transcriptions_fts(transcriptions_fts, rowid, video_filename, username, transcription_text)
+                VALUES ('delete', old.id, old.video_filename, old.username, old.transcription_text);
             END
         """)
         
         await self._connection.execute("""
             CREATE TRIGGER transcriptions_au 
             AFTER UPDATE ON transcriptions BEGIN
-                INSERT INTO transcriptions_fts(transcriptions_fts, rowid, video_filename, username, json_data)
-                VALUES ('delete', old.id, old.video_filename, old.username, old.json_data);
-                INSERT INTO transcriptions_fts(rowid, video_filename, username, json_data)
-                VALUES (new.id, new.video_filename, new.username, new.json_data);
+                INSERT INTO transcriptions_fts(transcriptions_fts, rowid, video_filename, username, transcription_text)
+                VALUES ('delete', old.id, old.video_filename, old.username, old.transcription_text);
+                INSERT INTO transcriptions_fts(rowid, video_filename, username, transcription_text)
+                VALUES (new.id, new.video_filename, new.username, new.transcription_text);
             END
         """)
         
@@ -113,6 +121,7 @@ class Database:
         video_filename: str, 
         job_id: str,
         username: str,
+        transcription_text: str,
         transcription_data: List[Dict]
     ) -> int:
         """
@@ -122,6 +131,7 @@ class Database:
             video_filename: Name of the video file
             job_id: Unique identifier for the transcription job
             username: Authenticated username for isolation
+            transcription_text: The full concatenated text of the transcription
             transcription_data: List of transcription segments with timestamps and text
             
         Returns:
@@ -131,10 +141,10 @@ class Database:
         
         cursor = await self._connection.execute(
             """
-            INSERT INTO transcriptions (video_filename, job_id, username, json_data)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO transcriptions (video_filename, job_id, username, transcription_text, json_data)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (video_filename, job_id, username, json_data)
+            (video_filename, job_id, username, transcription_text, json_data)
         )
         await self._connection.commit()
         
@@ -152,7 +162,7 @@ class Database:
         """
         cursor = await self._connection.execute(
             """
-            SELECT id, video_filename, job_id, username, json_data, created_at
+            SELECT id, video_filename, job_id, username, json_data, created_at, transcription_text
             FROM transcriptions
             WHERE job_id = ?
             """,
@@ -166,18 +176,27 @@ class Database:
                 "video_filename": row[1],
                 "job_id": row[2],
                 "username": row[3],
-                "transcription_data": json.loads(row[4]),
-                "created_at": row[5]
+                "transcription_data": json.loads(row[4]), # json_data
+                "created_at": row[5],
+                "transcription_text": row[6]
             }
         return None
     
-    async def search_transcriptions(self, query: str, username: str) -> List[Dict]:
+    async def search_transcriptions(
+        self, 
+        query: str, 
+        username: str,
+        limit: int,
+        offset: int
+    ) -> List[Dict]:
         """
         Search transcriptions using FTS5 full-text search with user isolation.
         
         Args:
             query: Search query string
             username: User identifier for isolation
+            limit: Max number of records to return
+            offset: Number of records to skip for pagination
             
         Returns:
             List of matching transcription records
@@ -193,9 +212,10 @@ class Database:
             FROM transcriptions t
             JOIN transcriptions_fts fts ON t.id = fts.rowid
             WHERE t.username = ? AND transcriptions_fts MATCH ?
-            ORDER BY t.created_at DESC
+            ORDER BY rank
+            LIMIT ? OFFSET ?
             """,
-            (username, safe_query)
+            (username, safe_query, limit, offset)
         )
         rows = await cursor.fetchall()
         
@@ -212,13 +232,20 @@ class Database:
         
         return results
     
-    async def get_all_transcriptions(self, username: Optional[str] = None) -> List[Dict]:
+    async def get_all_transcriptions(
+        self, 
+        username: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0
+    ) -> List[Dict]:
         """
         Retrieve all transcriptions, optionally filtered by username.
         
         Args:
             username: Optional user identifier for filtering
-            
+            limit: Max number of records to return
+            offset: Number of records to skip for pagination
+
         Returns:
             List of transcription records
         """
@@ -229,8 +256,9 @@ class Database:
                 FROM transcriptions
                 WHERE username = ?
                 ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
                 """,
-                (username,)
+                (username, limit, offset)
             )
         else:
             cursor = await self._connection.execute(
@@ -238,7 +266,8 @@ class Database:
                 SELECT id, video_filename, job_id, username, json_data, created_at
                 FROM transcriptions
                 ORDER BY created_at DESC
-                """
+                LIMIT ? OFFSET ?
+                """, (limit, offset)
             )
         rows = await cursor.fetchall()
         

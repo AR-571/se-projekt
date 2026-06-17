@@ -9,20 +9,21 @@ import asyncio
 import subprocess
 import json
 import re
-import yaml
 import bcrypt
 import jwt
 from jwt.exceptions import InvalidTokenError
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from filelock import FileLock
 import shutil
 import sqlite3
 import mimetypes
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends, Request, Query
 from fastapi.responses import JSONResponse, FileResponse, Response, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from dotenv import load_dotenv
 
 from database import Database
 from models import (
@@ -34,10 +35,14 @@ from models import (
     TranscriptionSegment
 )
 
+# Load environment variables from .env file
+load_dotenv()
+
 
 # Configuration
 WORKSPACE_BASE_DIR = Path(__file__).parent / "workspaces"
 HOME_CACHE_PATH = Path.home() / ".cache" / "huggingface"
+GPU_LOCK_PATH = WORKSPACE_BASE_DIR / ".gpu.lock"
 DB_PATH = "transcriptions.db"
 
 # Authentication Configuration
@@ -62,9 +67,6 @@ db = Database(db_path=DB_PATH)
 # Global job progress tracking
 job_progress = {}
 
-# GPU concurrency lock to prevent multiple simultaneous transcriptions
-is_processing_active = False
-
 
 @app.on_event("startup")
 async def startup_event():
@@ -74,6 +76,8 @@ async def startup_event():
     await db.connect()
     # Ensure workspace directory exists
     WORKSPACE_BASE_DIR.mkdir(parents=True, exist_ok=True)
+    # Ensure lock file can be created by touching it
+    GPU_LOCK_PATH.touch()
 
 
 @app.on_event("shutdown")
@@ -123,16 +127,19 @@ def verify_password(plain_password, hashed_password):
     return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
 
 def authenticate_user(username, password):
-    config_path = Path(__file__).parent / "config.yaml"
-    try:
-        with open(config_path) as file:
-            config = yaml.safe_load(file)
-        users = config.get("credentials", {}).get("usernames", {})
-        if username in users:
-            if verify_password(password, users[username]["password"]):
+    admin_username = os.getenv("ADMIN_USERNAME", "admin")
+    admin_password_hash = os.getenv("ADMIN_PASSWORD_HASH")
+    
+    if not admin_password_hash:
+        print("Error: ADMIN_PASSWORD_HASH environment variable is not set. Authentication disabled.")
+        return None
+        
+    if username == admin_username:
+        try:
+            if verify_password(password, admin_password_hash):
                 return username
-    except Exception as e:
-        print(f"Error loading users from config.yaml: {e}")
+        except ValueError as e:
+            print(f"Password verification error: {e}")
     return None
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -177,8 +184,13 @@ async def run_docker_transcription(job_id: str, workspace_path: Path, filename: 
         True if transcription succeeded, False otherwise
     """
     try:
-        # Convert paths to absolute paths (required by Docker for host directory mounts)
-        workspace_absolute = workspace_path.resolve()
+        # Determine the host path for Docker volume mounts, using HOST_WORKSPACE_DIR if available
+        host_workspace_dir = os.getenv("HOST_WORKSPACE_DIR")
+        if host_workspace_dir:
+            workspace_mount_path = Path(host_workspace_dir) / job_id
+        else:
+            workspace_mount_path = workspace_path.resolve()
+
         cache_absolute = HOME_CACHE_PATH.resolve()
         
         # Construct the Docker command
@@ -187,7 +199,7 @@ async def run_docker_transcription(job_id: str, workspace_path: Path, filename: 
             "--memory", "12g",          # Limit RAM to prevent host swap/freeze
             "--memory-swap", "12g",     # Disable swapping for the container
             # "--cpus", "4.0",          # Optional: Limit CPU cores if necessary
-            "-v", f"{workspace_absolute}:/workspace",
+            "-v", f"{workspace_mount_path}:/workspace",
             "-v", f"{cache_absolute}:/root/.cache/huggingface",
             "whisper-clean",
             f"/workspace/{filename}",
@@ -311,59 +323,58 @@ async def process_transcription(job_id: str, workspace_path: Path, filename: str
         filename: Name of the video file
         username: Authenticated username for isolation
     """
-    global is_processing_active
+    # Use a file-based lock to ensure only one transcription runs at a time system-wide
+    gpu_lock = FileLock(GPU_LOCK_PATH)
     try:
-        # Set GPU concurrency lock
-        is_processing_active = True
-        
-        # Get video duration for progress tracking
-        video_path = workspace_path / filename
-        total_duration = get_video_duration(video_path)
-        
-        if total_duration is None:
-            print(f"Failed to get video duration for job {job_id}, using default 0")
-            total_duration = 0.0
-        
-        # Run Docker transcription asynchronously
-        success = await run_docker_transcription(
-            job_id,
-            workspace_path,
-            filename,
-            total_duration,
-            username
-        )
-        
-        if not success:
-            print(f"Transcription failed for job {job_id}")
-            return
-        
-        # Find the generated JSON file (expected to have same name as video but .json extension)
-        json_filename = Path(filename).stem + ".json"
-        json_path = workspace_path / json_filename
-        
-        if not json_path.exists():
-            print(f"JSON file not found at {json_path}")
-            return
-        
-        # Read and parse the JSON file
-        with open(json_path, 'r', encoding='utf-8') as f:
-            transcription_data = json.load(f)
-        
-        # Store transcription in database
-        await db.save_transcription(
-            video_filename=filename,
-            job_id=job_id,
-            username=username,
-            transcription_data=transcription_data
-        )
-        
-        print(f"Transcription completed and stored for job {job_id}")
+        with gpu_lock:  # This will block until the lock is acquired
+            # Get video duration for progress tracking
+            video_path = workspace_path / filename
+            total_duration = get_video_duration(video_path)
+            
+            if total_duration is None:
+                print(f"Failed to get video duration for job {job_id}, using default 0")
+                total_duration = 0.0
+            
+            # Run Docker transcription asynchronously
+            success = await run_docker_transcription(
+                job_id,
+                workspace_path,
+                filename,
+                total_duration,
+                username
+            )
+            
+            if not success:
+                print(f"Transcription failed for job {job_id}")
+                return
+            
+            # Find the generated JSON file
+            json_filename = Path(filename).stem + ".json"
+            json_path = workspace_path / json_filename
+            
+            if not json_path.exists():
+                print(f"JSON file not found at {json_path}")
+                return
+            
+            with open(json_path, 'r', encoding='utf-8') as f:
+                transcription_data = json.load(f)
+            
+            # Extract pure text from segments for FTS indexing
+            transcription_text = " ".join([segment['text'] for segment in transcription_data])
+            
+            # Store transcription in database
+            await db.save_transcription(
+                video_filename=filename,
+                job_id=job_id,
+                username=username,
+                transcription_text=transcription_text,
+                transcription_data=transcription_data
+            )
+            
+            print(f"Transcription completed and stored for job {job_id}")
         
     except Exception as e:
         print(f"Error processing transcription for job {job_id}: {str(e)}")
-    finally:
-        # Always clear GPU concurrency lock
-        is_processing_active = False
 
 
 # --- ENDPOINTS ---
@@ -402,15 +413,6 @@ async def upload_video(
     Returns:
         UploadResponse with job_id and status
     """
-    
-    # Check GPU concurrency lock
-    global is_processing_active
-    if is_processing_active:
-        raise HTTPException(
-            status_code=429,
-            detail="GPU is currently busy processing another video. Please wait."
-        )
-    
     # Validate file extension
     allowed_extensions = {".mp4", ".mp3", ".wav", ".m4a"}
     file_ext = Path(file.filename).suffix.lower()
@@ -519,19 +521,24 @@ async def get_transcription(
 @app.post("/search", response_model=SearchResponse)
 async def search_transcriptions(
     request: SearchRequest,
-    current_user: str = Depends(get_current_user)
+    current_user: str = Depends(get_current_user),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0)
 ) -> SearchResponse:
     """
     Search transcriptions using full-text search.
     
     Args:
         request: SearchRequest containing the search query
+        current_user: Authenticated user from token
+        limit: Maximum number of results to return
+        offset: Number of results to skip for pagination
         
     Returns:
         SearchResponse with matching transcriptions
     """
     try:
-        results = await db.search_transcriptions(request.query, current_user)
+        results = await db.search_transcriptions(request.query, current_user, limit, offset)
         
         # Convert results to Pydantic models and count matching text segments
         transcription_responses = []
@@ -572,19 +579,23 @@ async def search_transcriptions(
 
 @app.get("/transcriptions", response_model=SearchResponse)
 async def get_all_transcriptions(
-    current_user: str = Depends(get_current_user)
+    current_user: str = Depends(get_current_user),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0)
 ) -> SearchResponse:
     """
     Retrieve all transcriptions for the authenticated user.
     
     Args:
         current_user: User identifier from JWT
+        limit: Maximum number of results to return
+        offset: Number of results to skip for pagination
         
     Returns:
         SearchResponse with transcriptions
     """
     try:
-        results = await db.get_all_transcriptions(current_user)
+        results = await db.get_all_transcriptions(current_user, limit, offset)
         
         # Convert results to Pydantic models
         transcription_responses = []
