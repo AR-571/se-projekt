@@ -15,7 +15,7 @@ from jwt.exceptions import InvalidTokenError
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
-from filelock import FileLock
+from filelock import FileLock, Timeout
 import shutil
 import sqlite3
 import mimetypes
@@ -207,8 +207,6 @@ async def run_docker_transcription(job_id: str, workspace_path: Path, filename: 
             "medium"
         ]
         
-        # Initialize progress for this job
-        job_progress[job_id] = {"progress": 0.0, "username": username}
         
         # Run the Docker container asynchronously
         process = await asyncio.create_subprocess_exec(
@@ -299,10 +297,6 @@ async def run_docker_transcription(job_id: str, workspace_path: Path, filename: 
     except Exception as e:
         print(f"Error running Docker command: {str(e)}")
         return False
-    finally:
-        # Clean up progress entry when done
-        if job_id in job_progress:
-            del job_progress[job_id]
 
 
 async def process_transcription(job_id: str, workspace_path: Path, filename: str, username: str) -> None:
@@ -325,8 +319,20 @@ async def process_transcription(job_id: str, workspace_path: Path, filename: str
     """
     # Use a file-based lock to ensure only one transcription runs at a time system-wide
     gpu_lock = FileLock(GPU_LOCK_PATH)
+    
+    # Initialize progress immediately so the frontend knows it's queued
+    job_progress[job_id] = {"progress": 0.0, "username": username}
+    
     try:
-        with gpu_lock:  # This will block until the lock is acquired
+        # Acquire lock non-blocking to prevent freezing the FastAPI event loop
+        while True:
+            try:
+                gpu_lock.acquire(timeout=0)
+                break
+            except Timeout:
+                await asyncio.sleep(2)
+                
+        try:
             # Get video duration for progress tracking
             video_path = workspace_path / filename
             total_duration = get_video_duration(video_path)
@@ -372,9 +378,16 @@ async def process_transcription(job_id: str, workspace_path: Path, filename: str
             )
             
             print(f"Transcription completed and stored for job {job_id}")
+            
+        finally:
+            gpu_lock.release()
         
     except Exception as e:
         print(f"Error processing transcription for job {job_id}: {str(e)}")
+    finally:
+        # Clean up progress entry when completely done (including DB save)
+        if job_id in job_progress:
+            del job_progress[job_id]
 
 
 # --- ENDPOINTS ---
