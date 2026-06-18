@@ -66,7 +66,7 @@ class Database:
         if 'text_content' in columns:
             await self._connection.execute("DROP TABLE IF EXISTS transcriptions_fts")
 
-        # Alte Trigger immer löschen, um sie frisch anzulegen
+        # Always delete old triggers to recreate them fresh
         await self._connection.execute("DROP TRIGGER IF EXISTS transcriptions_ai")
         await self._connection.execute("DROP TRIGGER IF EXISTS transcriptions_ad")
         await self._connection.execute("DROP TRIGGER IF EXISTS transcriptions_au")
@@ -83,7 +83,7 @@ class Database:
             )
         """)
         
-        # Falls wir die alte Tabelle gelöscht haben, Index aus der Haupttabelle neu aufbauen
+        # If we deleted the old table, rebuild index from the main table
         if 'text_content' in columns:
             await self._connection.execute("INSERT INTO transcriptions_fts(transcriptions_fts) VALUES('rebuild')")
 

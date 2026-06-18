@@ -48,7 +48,7 @@ DB_PATH = "transcriptions.db"
 # Authentication Configuration
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-super-secret-jwt-key-change-in-production")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 1 Tag
+ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 1 day
 STREAMING_TOKEN_EXPIRE_MINUTES = 5
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
@@ -127,19 +127,34 @@ def verify_password(plain_password, hashed_password):
     return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
 
 def authenticate_user(username, password):
+    # 1. Admin check via .env (existing)
     admin_username = os.getenv("ADMIN_USERNAME", "admin")
     admin_password_hash = os.getenv("ADMIN_PASSWORD_HASH")
     
-    if not admin_password_hash:
-        print("Error: ADMIN_PASSWORD_HASH environment variable is not set. Authentication disabled.")
-        return None
-        
-    if username == admin_username:
+    if username == admin_username and admin_password_hash:
         try:
             if verify_password(password, admin_password_hash):
                 return username
         except ValueError as e:
             print(f"Password verification error: {e}")
+            
+    # 2. Dynamic test user check (hashed, per user)
+    test_users_str = os.getenv("TEST_USERS", "")
+    if test_users_str:
+        test_users = [u.strip() for u in test_users_str.split(",") if u.strip()]
+        
+        if username in test_users:
+            # Build the variable name dynamically, e.g., TUTOR_PASSWORD_HASH
+            hash_var_name = f"{username.upper()}_PASSWORD_HASH"
+            user_password_hash = os.getenv(hash_var_name)
+            
+            if user_password_hash:
+                try:
+                    if verify_password(password, user_password_hash):
+                        return username
+                except ValueError as e:
+                    print(f"Password verification error for {username}: {e}")
+            
     return None
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -709,13 +724,13 @@ async def get_media(job_id: str, token: str, request: Request):
     content_type, _ = mimetypes.guess_type(file_path)
     content_type = content_type or "application/octet-stream"
     
-    # Prüfen, ob der Browser einen spezifischen Teil (Range) anfordert
+    # Check if the browser requests a specific part (Range)
     range_header = request.headers.get("range")
     if not range_header:
         return FileResponse(file_path, headers={"Accept-Ranges": "bytes"}, media_type=content_type)
         
     try:
-        # Den Range-Header parsen (z.B. "bytes=0-1023")
+        # Parse the Range header (e.g., "bytes=0-1023")
         byte_range = range_header.replace("bytes=", "").split("-")
         start = int(byte_range[0])
         end = int(byte_range[1]) if len(byte_range) > 1 and byte_range[1] else file_size - 1
@@ -731,7 +746,7 @@ async def get_media(job_id: str, token: str, request: Request):
         
     chunk_size = end - start + 1
     
-    # Generator-Funktion, die das Video effizient in kleinen 1MB Blöcken lädt
+    # Generator function that efficiently loads the video in small 1MB chunks
     def file_iterator(path, start_byte, bytes_to_read):
         with open(path, "rb") as f:
             f.seek(start_byte)
@@ -753,7 +768,7 @@ async def get_media(job_id: str, token: str, request: Request):
     
     return StreamingResponse(
         file_iterator(file_path, start, chunk_size),
-        status_code=206,  # 206 Partial Content sagt dem Browser, dass dies nur ein Chunk ist
+        status_code=206,  # 206 Partial Content tells the browser that this is only a chunk
         headers=headers
     )
 
