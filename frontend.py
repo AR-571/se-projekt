@@ -408,12 +408,12 @@ def main():
                                 }}
                             </style>
                             <div class="player-wrapper">
-                                <video controls autocomplete="off" src="{stream_url}">Ihr Browser unterstützt dieses Video nicht.</video>
+                                <video controls autocomplete="off" src="{stream_url}">Your browser does not support this video.</video>
                             </div>
                             '''
                             components.html(html_code, height=600)
                         else:
-                            html_code = f'''<audio style="width: 100%;" controls src="{stream_url}">Ihr Browser unterstützt dieses Audio nicht.</audio>'''
+                            html_code = f'''<audio style="width: 100%;" controls src="{stream_url}">Your browser does not support this audio.</audio>'''
                             components.html(html_code, height=80)
                     else:
                         st.warning("Media stream not available.")
@@ -442,7 +442,7 @@ def main():
                 }}
             </style>
             <div class="player-wrapper">
-                <video id="mediaPlayer" controls autoplay autocomplete="off" src="{media_url}">Ihr Browser unterstützt dieses Video nicht.</video>
+                <video id="mediaPlayer" controls autoplay autocomplete="off" src="{media_url}">Your browser does not support this video.</video>
             </div>
             <script>
                 var player = document.getElementById("mediaPlayer");
@@ -456,7 +456,7 @@ def main():
         else:
             html_code = f'''
             <audio id="mediaPlayer" style="width: 100%;" controls autoplay src="{media_url}">
-                Ihr Browser unterstützt dieses Audio nicht.
+                Your browser does not support this audio.
             </audio>
             <script>
                 var player = document.getElementById("mediaPlayer");

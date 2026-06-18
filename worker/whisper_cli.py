@@ -5,7 +5,7 @@ from pathlib import Path
 from faster_whisper import WhisperModel
 
 def transcribe(audio_path, output_dir, model_name, language):
-    # Pfade zu Path-Objekten machen und absolutieren
+    # Convert paths to Path objects and make them absolute
     audio_file = Path(audio_path).resolve()
     out_dir = Path(output_dir).resolve()
     
@@ -17,7 +17,7 @@ def transcribe(audio_path, output_dir, model_name, language):
     
     print(json.dumps({"status": "transcribing"}), flush=True)
     
-    # Transkription auf dem absoluten Pfad ausführen
+    # Execute transcription on the absolute path
     segments, info = model.transcribe(str(audio_file), language=lang_param, beam_size=1)
     
     print(json.dumps({"status": "language_detected", "language": info.language}), flush=True)
@@ -38,7 +38,7 @@ def transcribe(audio_path, output_dir, model_name, language):
             "text": segment.text.strip()
         })
 
-    # Die JSON-Datei landet jetzt sauber im angegebenen Ordner
+    # The JSON file now lands cleanly in the specified folder
     output_path = out_dir / (audio_file.stem + ".json")
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
@@ -47,16 +47,16 @@ def transcribe(audio_path, output_dir, model_name, language):
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Whisper CLI Worker")
-    parser.add_argument("audio_path", help="Pfad zur Audiodatei")
-    parser.add_argument("output_dir", help="Verzeichnis für die JSON-Ausgabe")
-    parser.add_argument("--model", default="medium", help="Modellgröße (default: medium)")
-    parser.add_argument("--language", default=None, help="Sprache (z.B. 'de' oder 'en'). Leer für Auto-Detect.")
+    parser.add_argument("audio_path", help="Path to the audio file")
+    parser.add_argument("output_dir", help="Directory for the JSON output")
+    parser.add_argument("--model", default="medium", help="Model size (default: medium)")
+    parser.add_argument("--language", default=None, help="Language (e.g., 'de' or 'en'). Leave empty for auto-detect.")
     
     args = parser.parse_args()
     
     try:
         transcribe(args.audio_path, args.output_dir, args.model, args.language)
     except Exception as e:
-        # Fange Fehler ab und sende sie strukturiert an FastAPI
+        # Catch errors and send them structured to FastAPI
         print(json.dumps({"status": "error", "message": str(e)}), flush=True)
         sys.exit(1)

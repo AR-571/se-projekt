@@ -1,9 +1,11 @@
 # Video Transcription Service
 
-FastAPI backend for transcribing videos using Whisper Docker container with searchable transcriptions stored in SQLite with FTS5 full-text search.
+FastAPI backend and Streamlit frontend for transcribing videos using a Whisper Docker container with searchable transcriptions stored in SQLite with FTS5 full-text search.
 
 ## Features
 
+- **Streamlit Frontend**: Interactive UI for uploading videos, searching transcriptions, and media playback.
+- **User Authentication**: Secure login using JWT, bcrypt password hashing, and user data isolation.
 - **Video Upload**: Upload videos via POST /upload endpoint
 - **Docker Orchestration**: Uses whisper-clean Docker container for transcription
 - **Async Processing**: Non-blocking background task processing
